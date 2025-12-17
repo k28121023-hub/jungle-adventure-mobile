@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>單字獵人冒險遊戲 (Fix)</title>
+    
+    <!-- 移除 crossorigin 以避免潛在的 CORS 阻擋，改用 cdnjs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
+        
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Noto Sans TC', sans-serif;
+            width: 100vw;
+            height: 100vh;
+            position: fixed;
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        
+        #root { width: 100%; height: 100%; }
+
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            background-color: #1a1a1a;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.8);
+        }
+
+        .game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            /* 畫面靠下對齊，並留有空間，讓視覺重心在下方 */
+            align-items: flex-end; 
+            padding-bottom: 80px; 
+            background: #111;
+        }
+
+        button { touch-action: manipulation; cursor: pointer; }
+
+        /* 虛擬按鍵 */
+        .touch-btn {
+            background: rgba(255, 255, 255, 0.15);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            backdrop-filter: blur(4px);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.5rem;
+            transition: transform 0.1s, background 0.1s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            touch-action: none; 
+        }
+        .touch-btn:active { transform: scale(0.9); background: rgba(255, 255, 255, 0.4); border-color: white; }
+        .shoot-btn { background: rgba(239, 68, 68, 0.3); border-color: rgba(239, 68, 68, 0.6); }
+        .shoot-btn:active { background: rgba(239, 68, 68, 0.6); }
+        .jump-btn { background: rgba(59, 130, 246, 0.3); border-color: rgba(59, 130, 246, 0.6); }
+
+        .animate-bounce-text { animation: bounce 1s infinite; }
+        @keyframes bounce { 0%, 100% { transform: translateY(-5%); } 50% { transform: translateY(5%); } }
+
+        .landscape-warning { display: none; }
+        @media (orientation: portrait) { .landscape-warning { display: flex; } }
+
+        /* 錯誤顯示區 (Debug) - 用於顯示紅字錯誤 */
+        #debug-log {
+            position: absolute; top: 0; left: 0; 
+            color: #ff4444; background: rgba(0,0,0,0.8); 
+            font-size: 12px; padding: 5px; max-width: 300px;
+            pointer-events: none; z-index: 9999;
+            display: none; /* 預設隱藏，出錯才顯示 */
+        }
+    </style>
+</head>
+<body>
+    <div id="debug-log"></div>
+    <div id="root"></div>
+
+    <script>
+        // 全局錯誤攔截
+        window.onerror = function(msg, url, line) {
+            const log = document.getElementById('debug-log');
+            if (log) {
+                log.style.display = 'block';
+                log.innerHTML += `ERROR: ${msg} (Line: ${line})<br>`;
+            }
+            return false;
+        };
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, Component } = React;
+
+        // --- 錯誤邊界 ---
+        class ErrorBoundary extends Component {
+            constructor(props) { super(props); this.state = { hasError: false }; }
+            static getDerivedStateFromError(error) { return { hasError: true }; }
+            componentDidCatch(error, errorInfo) { console.error(error, errorInfo); }
+            render() {
+                if (this.state.hasError) return (
+                    <div className="flex flex-col items-center justify-center h-full text-white bg-gray-900">
+                        <h2 className="text-xl mb-4 text-red-500">遊戲發生錯誤</h2>
+                        <button onClick={()=>window.location.reload()} className="bg-blue-600 px-4 py-2 rounded">重新載入</button>
+                    </div>
+                );
+                return this.props.children;
+            }
+        }
+
+        // --- 遊戲資料 ---
+        const VOCABULARY = [
+            { en: "Handbook", zh: "手冊" }, { en: "President", zh: "總統" },
+            { en: "Tour", zh: "巡視" }, { en: "Name Tag", zh: "姓名貼" },
+            { en: "Paperwork", zh: "文書" }, { en: "Supervisor", zh: "監督者" },
+            { en: "Agreement", zh: "協定" }, { en: "Package", zh: "文件包" },
+            { en: "Training Schedule", zh: "訓練時程" }, { en: "Toast", zh: "乾杯" },
+            { en: "Tray", zh: "托盤" }, { en: "Counter", zh: "櫃台" },
+            { en: "Event", zh: "活動" }, { en: "Client", zh: "顧客" },
+            { en: "Security", zh: "安全" }, { en: "Coworker", zh: "同事" },
+            { en: "Go Through", zh: "審閱" }
+        ];
+
+        const ASSETS_CONFIG = {
+            hunter: { src: 'hunter.png', emoji: '🤠' },
+            boss:   { src: 'dinosaur.png', emoji: '🦖' }, 
+            eagle:    { src: 'eagle.png', emoji: '🦅' },
+            tiger:    { src: 'tiger.png', emoji: '🐯' },
+            elephant: { src: 'elephant.png', emoji: '🐘' },
+            fox:      { src: 'fox.png', emoji: '🦊' },
+            monkey:   { src: 'monkey.png', emoji: '🐒' },
+            hunter_up:   { src: 'hunter2.png', emoji: '🤠' },
+            hunter_left: { src: 'hunter3.png', emoji: '🤠' },
+            hunter_crouch: { src: 'hunter4.png', emoji: '🤠' },
+            wall: { src: 'wall.png', emoji: '🧱' },
+            tree: { src: 'tree.png', emoji: '🌲' },
+            rock: { src: 'rock.png', emoji: '🪨' },
+            cactus: { src: 'cactus.png', emoji: '🌵' } 
+        };
+
+        const MONSTER_KEYS = ["eagle", "tiger", "elephant", "fox", "monkey"];
+        // 牆壁 80x160，跳躍力 -16 足以跳過
+        const OBSTACLE_TYPES = [
+            { type: "📦", key: "wall", solid: true, damage: false, w: 80, h: 80 },
+            { type: "🧱", key: "wall", solid: true, damage: false, w: 80, h: 160 },
+            { type: "🪨", key: "rock", solid: true, damage: false, w: 90, h: 60 },
+            { type: "🌵", key: "cactus", solid: false, damage: true, w: 60, h: 80 },
+        ];
+
+        // --- 資源載入 Hook ---
+        const useGameAssets = () => {
+            const [images, setImages] = useState({});
+            const [loaded, setLoaded] = useState(false);
+            
+            useEffect(() => {
+                const loadedImages = {};
+                const keys = Object.keys(ASSETS_CONFIG);
+                let count = 0;
+                
+                if (keys.length === 0) { setLoaded(true); return; }
+
+                keys.forEach(key => {
+                    const img = new Image();
+                    img.src = ASSETS_CONFIG[key].src;
+                    const done = () => { count++; if(count >= keys.length) setLoaded(true); };
+                    img.onload = done;
+                    img.onerror = done; // 失敗也視為完成，使用 Emoji Fallback
+                    loadedImages[key] = img;
+                });
+                
+                setImages(loadedImages);
+                // 1.5秒後強制進入，防止卡載入
+                const timer = setTimeout(() => setLoaded(true), 1500);
+                return () => clearTimeout(timer);
+            }, []);
+            return { images, loaded };
+        };
+
+        // --- 繪圖輔助 (優先定義，解決 ReferenceError) ---
+        const drawEmojiFallback = (ctx, emoji, x, y, w, h) => {
+            ctx.textAlign = 'center'; 
+            ctx.textBaseline = 'middle';
+            const fontSize = Math.min(w, h) * 0.8; 
+            ctx.font = `${fontSize}px Arial`;
+            ctx.fillStyle = '#fff'; 
+            ctx.fillText(emoji || '?', x + w/2, y + h/2);
+        };
+
+        const drawEntity = (ctx, assets, type, x, y, w, h, frameCount = 0, isMoving = false, isAimingUp = false, isCrouching = false, facing = 'right') => {
+            if (!ctx) return;
+            
+            let currentType = type;
+            let flip = false;
+            
+            if (type === 'hunter') {
+                if (isCrouching) { currentType = 'hunter_crouch'; if (facing === 'left') flip = true; } 
+                else if (isAimingUp) { currentType = 'hunter_up'; if (facing === 'left') flip = true; } 
+                else if (facing === 'left') { currentType = 'hunter_left'; } 
+                else { currentType = 'hunter'; }
+            }
+            if (type === '📦' || type === '🧱') currentType = 'wall';
+            else if (type === '🪨') currentType = 'rock';
+            else if (type === '🌵') currentType = 'cactus';
+
+            const config = ASSETS_CONFIG[currentType] || { emoji: '?' };
+            const img = assets[currentType];
+            
+            let drawY = y; let rotation = 0;
+            if (isMoving && type === 'hunter' && !isAimingUp && !isCrouching) {
+                drawY += Math.sin(frameCount * 0.2) * 3;
+                rotation = Math.sin(frameCount * 0.15) * 0.05;
+            }
+            if (type === 'hunter' && isCrouching) drawY += 10;
+
+            ctx.save();
+            ctx.translate(x + w/2, drawY + h/2);
+            ctx.rotate(rotation);
+            if (flip) ctx.scale(-1, 1);
+            ctx.translate(-(x + w/2), -(drawY + h/2));
+
+            // 安全繪圖：確保圖片存在才畫，否則畫 Emoji
+            if (img && img.complete && img.naturalWidth > 0) {
+                try {
+                    ctx.drawImage(img, x, drawY, w, h);
+                } catch (e) {
+                    drawEmojiFallback(ctx, config.emoji, x, drawY, w, h);
+                }
+            } else {
+                drawEmojiFallback(ctx, config.emoji, x, drawY, w, h);
+            }
+            ctx.restore();
+        };
+
+        const drawRoundRect = (ctx, x, y, w, h, r) => {
+            if (w < 2 * r) r = w / 2; if (h < 2 * r) r = h / 2;
+            if (r < 0) r = 0;
+            ctx.beginPath(); ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+        };
+
+        const generateSimilarWord = (word) => {
+            if (!word) return "Word";
+            return word + "s";
+        };
+
+        // --- 介面元件 ---
+        const Controls = ({ onInput }) => {
+            const handleAction = (key, active) => (e) => {
+                if(e.cancelable && e.type !== 'mousedown') e.preventDefault(); 
+                e.stopPropagation();
+                onInput(key, active);
+            };
+
+            return (
+                <div className="absolute inset-0 pointer-events-none z-50">
+                    <div className="absolute bottom-4 left-4 pointer-events-auto">
+                        <div className="flex flex-col items-center gap-1">
+                             <div className="flex gap-3">
+                                <div className="touch-btn w-16 h-16 md:w-20 md:h-20"
+                                     onTouchStart={handleAction('ArrowLeft', true)} onTouchEnd={handleAction('ArrowLeft', false)}
+                                     onMouseDown={handleAction('ArrowLeft', true)} onMouseUp={handleAction('ArrowLeft', false)}>⬅</div>
+                                <div className="touch-btn w-16 h-16 md:w-20 md:h-20"
+                                     onTouchStart={handleAction('ArrowRight', true)} onTouchEnd={handleAction('ArrowRight', false)}
+                                     onMouseDown={handleAction('ArrowRight', true)} onMouseUp={handleAction('ArrowRight', false)}>➡</div>
+                             </div>
+                             <div className="touch-btn w-16 h-16 md:w-20 md:h-20"
+                                  onTouchStart={handleAction('ArrowDown', true)} onTouchEnd={handleAction('ArrowDown', false)}
+                                  onMouseDown={handleAction('ArrowDown', true)} onMouseUp={handleAction('ArrowDown', false)}>⬇</div>
+                        </div>
+                    </div>
+
+                    <div className="absolute bottom-6 right-6 pointer-events-auto flex gap-3 items-end">
+                        <div className="touch-btn shoot-btn w-20 h-20 md:w-24 md:h-24 mb-1"
+                             onTouchStart={handleAction('Space', true)} onTouchEnd={handleAction('Space', false)}
+                             onMouseDown={handleAction('Space', true)} onMouseUp={handleAction('Space', false)}>🔫</div>
+                        <div className="touch-btn jump-btn w-20 h-20 md:w-24 md:h-24 mb-12"
+                             onTouchStart={handleAction('ArrowUp', true)} onTouchEnd={handleAction('ArrowUp', false)}
+                             onMouseDown={handleAction('ArrowUp', true)} onMouseUp={handleAction('ArrowUp', false)}>⬆</div>
+                    </div>
+                </div>
+            );
+        };
+
+        const StatusOverlay = ({ hp, bossHp, currentTarget, feedback, total, completed }) => (
+            <div className="absolute top-0 left-0 w-full p-2 flex justify-between items-start pointer-events-none game-overlay z-30">
+                <div className="flex flex-col gap-1">
+                    <div className="bg-black bg-opacity-60 px-2 py-1 rounded border border-green-500 text-green-400 font-bold text-sm md:text-base">❤️ {hp}%</div>
+                    {total && <div className="bg-black bg-opacity-60 px-2 py-1 rounded border border-blue-500 text-blue-300 font-bold text-sm md:text-base">📚 {completed} / {total}</div>}
+                </div>
+                
+                <div className="absolute left-1/2 transform -translate-x-1/2 top-2 w-auto flex flex-col items-center">
+                    <div className="bg-red-900 bg-opacity-90 px-3 py-1 rounded-lg border-2 border-red-500 text-center shadow-md">
+                        <div className="text-gray-400 text-[10px] uppercase tracking-widest font-bold">任務目標</div>
+                        <div className="text-xl md:text-2xl font-bold text-white whitespace-nowrap"><span className="text-yellow-400">{currentTarget || "..."}</span></div>
+                    </div>
+                    {feedback && (<div className="mt-2 text-3xl md:text-5xl font-black text-yellow-300 animate-bounce-text" style={{textShadow: '2px 2px 0 red'}}>{feedback}</div>)}
+                </div>
+
+                {bossHp !== undefined && (
+                    <div className="w-24 md:w-36">
+                        <div className="text-right text-red-500 font-bold mb-1 text-xs md:text-sm">BOSS</div>
+                        <div className="w-full bg-gray-700 h-3 md:h-5 rounded-full border border-gray-500 overflow-hidden">
+                            <div className="bg-red-600 h-full transition-all duration-300" style={{width: `${(bossHp / 140) * 100}%`}}></div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+
+        const Level1Engine = ({ hp, setHp, onComplete, onGameOver, assets }) => {
+            const canvasRef = useRef(null);
+            const requestRef = useRef();
+            const [completedCount, setCompletedCount] = useState(0);
+            const [totalWords, setTotalWords] = useState(0);
+            const [currentTarget, setCurrentTarget] = useState(null);
+            const stateRef = useRef({
+                // 跳躍力 -16，確保能跳過高牆
+                hunter: { x: 100, y: 0, width: 80, height: 80, vy: 0, speed: 5, isGrounded: false, hitFlash: 0, facing: 'right' },
+                gravity: 0.6, jumpPower: -16, cameraX: 0, shake: 0, 
+                bullets: [], particles: [], enemies: [], words: [], obstacles: [], keys: {}, lastShot: 0, frameCount: 0, currentHp: hp, nextSpawnX: 400, isCompleted: false, wordQueue: []
+            });
+
+            useEffect(() => {
+                const level1Words = VOCABULARY.slice(0, 10);
+                const shuffled = [...level1Words].sort(() => 0.5 - Math.random());
+                stateRef.current.wordQueue = shuffled;
+                setTotalWords(shuffled.length);
+                setCurrentTarget(shuffled[0]);
+                
+                const animate = () => {
+                    if (loopRef.current) loopRef.current();
+                    requestRef.current = requestAnimationFrame(animate);
+                };
+                requestRef.current = requestAnimationFrame(animate);
+                
+                window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp);
+                return () => { 
+                    cancelAnimationFrame(requestRef.current); 
+                    window.removeEventListener('keydown', handleKeyDown); 
+                    window.removeEventListener('keyup', handleKeyUp); 
+                };
+            }, []);
+
+            useEffect(() => { stateRef.current.currentHp = hp; if(hp <= 0) onGameOver(); }, [hp]);
+
+            const handleWordCompleted = () => {
+                const nextQueue = stateRef.current.wordQueue.slice(1);
+                stateRef.current.wordQueue = nextQueue;
+                const nextWord = nextQueue.length > 0 ? nextQueue[0] : null;
+                setCurrentTarget(nextWord);
+                setCompletedCount(c => c + 1);
+                if (!nextWord) { stateRef.current.isCompleted = true; setTimeout(() => onComplete(stateRef.current.currentHp), 1000); }
+            };
+
+            const handleKeyDown = (e) => stateRef.current.keys[e.code] = true;
+            const handleKeyUp = (e) => stateRef.current.keys[e.code] = false;
+            const handleMobileInput = (key, active) => stateRef.current.keys[key] = active;
+            const handleWordCompletedRef = useRef(handleWordCompleted);
+            handleWordCompletedRef.current = handleWordCompleted;
+
+            const loopLogic = () => {
+                const canvas = canvasRef.current; if (!canvas) return;
+                const ctx = canvas.getContext('2d'); const state = stateRef.current;
+                if (state.isCompleted) return;
+                const width = 800; const height = 400; const GROUND_LEVEL = height - 60;
+                
+                state.frameCount++;
+                if (state.hunter.hitFlash > 0) state.hunter.hitFlash--;
+                if (state.shake > 0) { state.shake *= 0.9; if(state.shake < 0.5) state.shake = 0; }
+                const rectIntersect = (r1, r2) => !(r2.x > r1.x + (r1.w || r1.width) || r2.x + (r2.w || r2.width) < r1.x || r2.y > r1.y + (r1.h || r1.height) || r2.y + (r2.h || r2.height) < r1.y);
+                const checkSolidCollision = (rect) => { for (let o of state.obstacles) { if (o.solid && !o.delete && rectIntersect(rect, o)) return o; } return null; };
+                const spawnBlood = (x, y) => { for(let i=0; i<8; i++) { state.particles.push({ x: x, y: y, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8 - 2, life: 1.0, color: `rgba(255, ${Math.random()*50}, 0, 1)` }); } };
+
+                state.hunter.vy += state.gravity;
+                const isCrouching = state.keys['ArrowDown'] && state.hunter.isGrounded;
+                let isMoving = false;
+                let dx = 0;
+                if (!isCrouching) {
+                    if (state.keys['ArrowLeft']) { dx -= state.hunter.speed; isMoving = true; state.hunter.facing = 'left'; }
+                    if (state.keys['ArrowRight']) { dx += state.hunter.speed; isMoving = true; state.hunter.facing = 'right'; }
+                }
+                let proposedX = state.hunter.x; let proposedCameraX = state.cameraX;
+                if (dx < 0) { if (proposedX > 0) proposedX += dx; } else if (dx > 0) { if (proposedX < width / 2) proposedX += dx; else proposedCameraX += dx; }
+                const hunterRectX = { x: proposedX + proposedCameraX, y: state.hunter.y, w: state.hunter.width, h: state.hunter.height };
+                let collisionRect = { ...hunterRectX };
+                if (isCrouching) { collisionRect.h = 45; collisionRect.y += 35; } 
+
+                if (!checkSolidCollision(collisionRect)) { state.hunter.x = proposedX; state.cameraX = proposedCameraX; }
+
+                let nextY = state.hunter.y + state.hunter.vy;
+                if (nextY + state.hunter.height >= GROUND_LEVEL) { nextY = GROUND_LEVEL - state.hunter.height; state.hunter.vy = 0; state.hunter.isGrounded = true; } else { state.hunter.isGrounded = false; }
+                const hunterRectY = { x: state.hunter.x + state.cameraX, y: nextY, w: state.hunter.width, h: state.hunter.height };
+                let collisionRectY = { ...hunterRectY };
+                if (isCrouching) { collisionRectY.h = 45; collisionRectY.y += 35; }
+
+                const hitY = checkSolidCollision(collisionRectY);
+                if (hitY) { if (state.hunter.vy > 0) { nextY = hitY.y - state.hunter.height; state.hunter.isGrounded = true; state.hunter.vy = 0; } else if (state.hunter.vy < 0) { nextY = hitY.y + hitY.h; state.hunter.vy = 0; } }
+                state.hunter.y = nextY;
+
+                if (state.keys['ArrowUp'] && state.hunter.isGrounded && !isCrouching) { state.hunter.vy = state.jumpPower; state.hunter.isGrounded = false; }
+                if (state.keys['Space'] && Date.now() - state.lastShot > 300) {
+                    const shootUp = state.keys['ArrowUp']; const isLeft = state.hunter.facing === 'left';
+                    const bulletVx = shootUp ? 0 : (isLeft ? -10 : 10); const bulletVy = shootUp ? -10 : 0;
+                    let spawnY = state.hunter.y + (shootUp ? -10 : 40); if (isCrouching) spawnY += 20;
+                    const startX = state.hunter.x + state.cameraX + (shootUp ? 40 : (isLeft ? 0 : 80));
+                    
+                    // 修改：增加子彈判定範圍 (w/h)，讓跳躍時更容易打中單字
+                    // 水平射擊高度設為 60 (原10)，讓垂直容錯率更高
+                    const bulletW = shootUp ? 15 : 40; 
+                    const bulletH = shootUp ? 40 : 60; 
+                    
+                    state.bullets.push({ x: startX, y: spawnY - (bulletH - 10)/2, w: bulletW, h: bulletH, vx: bulletVx, vy: bulletVy, delete: false });
+                    state.lastShot = Date.now();
+                }
+
+                if (state.cameraX + width > state.nextSpawnX) {
+                    state.nextSpawnX += 300 + Math.random() * 200;
+                    const rand = Math.random();
+                    if (rand < 0.4) {
+                        const type = MONSTER_KEYS[Math.floor(Math.random() * MONSTER_KEYS.length)];
+                        const isFlying = type === 'eagle'; const isMonkey = type === 'monkey';
+                        let spawnY = GROUND_LEVEL - 80; 
+                        if (isFlying) spawnY = Math.random() * (height - 250) + 50; 
+                        if (isMonkey) spawnY = -50;
+                        state.enemies.push({ x: state.cameraX + width + 50, y: spawnY, w: 80, h: 80, type: type, speed: isFlying ? 3 : 2 + Math.random(), hitPlayer: false, delete: false, isFlying: isFlying, isMonkey: isMonkey });
+                    } else if (rand < 0.7) {
+                        const obstacleType = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+                        state.obstacles.push({ x: state.cameraX + width + 50, y: GROUND_LEVEL - obstacleType.h + 5, w: obstacleType.w, h: obstacleType.h, type: obstacleType.type, key: obstacleType.key, solid: obstacleType.solid, damage: obstacleType.damage, hitPlayer: false, delete: false });
+                    } else {
+                        const spawnBaseX = state.cameraX + width + 50;
+                        if (currentTarget) state.words.push({ x: spawnBaseX, y: 100 + Math.random() * 200, w: 100, h: 35, text: currentTarget.en, isTarget: true, delete: false });
+                        if (currentTarget) state.words.push({ x: spawnBaseX + 180, y: 50 + Math.random() * 300, w: 100, h: 35, text: generateSimilarWord(currentTarget.en), isTarget: false, delete: false });
+                        let randomWord = VOCABULARY[Math.floor(Math.random() * 10)];
+                        if (currentTarget && randomWord.en === currentTarget.en) randomWord = VOCABULARY[(VOCABULARY.indexOf(randomWord) + 1) % 10];
+                        state.words.push({ x: spawnBaseX + 90, y: 150 + Math.random() * 200, w: 100, h: 35, text: randomWord.en, isTarget: false, delete: false });
+                    }
+                }
+
+                state.bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
+                state.enemies.forEach(e => { e.x -= e.speed; if (e.isFlying) { const playerCenterY = state.hunter.y + 40; if (e.y < playerCenterY - 10) e.y += 1; else if (e.y > playerCenterY + 10) e.y -= 1; } if (e.isMonkey) { if (e.y < GROUND_LEVEL - 80) e.y += 4; else e.y = GROUND_LEVEL - 80; } });
+                state.words.forEach(w => w.x -= 0.5);
+                state.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.life -= 0.05; }); state.particles = state.particles.filter(p => p.life > 0);
+                state.bullets = state.bullets.filter(b => b.x < state.cameraX + width && b.y > -50 && !b.delete); state.enemies = state.enemies.filter(e => e.x > state.cameraX - 100 && !e.delete); state.obstacles = state.obstacles.filter(o => o.x > state.cameraX - 100 && !o.delete); state.words = state.words.filter(w => w.x > state.cameraX - 100 && !w.delete);
+                
+                const hunterWorldBox = { ...state.hunter, x: state.hunter.x + state.cameraX };
+                if (isCrouching) { hunterWorldBox.h = 45; hunterWorldBox.y += 35; }
+
+                let wordMatched = false;
+                state.bullets.forEach(b => {
+                    if (b.delete) return;
+                    let hitSomething = false;
+                    state.words.forEach(w => {
+                        if (hitSomething) return;
+                        if (rectIntersect(b, w)) {
+                            hitSomething = true; b.delete = true; w.delete = true; 
+                            if (w.isTarget) { wordMatched = true; } 
+                            else { state.currentHp -= 10; setHp(state.currentHp); state.hunter.hitFlash = 30; spawnBlood(state.hunter.x + 40, state.hunter.y + 40); }
+                        }
+                    });
+                    state.enemies.forEach(e => { if (!e.delete && rectIntersect(b, e)) { b.delete = true; e.delete = true; } });
+                });
+                state.enemies.forEach(e => { if (!e.delete && !e.hitPlayer && rectIntersect(hunterWorldBox, e)) { e.hitPlayer = true; state.currentHp -= 15; setHp(state.currentHp); state.hunter.hitFlash = 30; state.shake = 15; spawnBlood(state.hunter.x + 40, state.hunter.y + 40); } });
+                state.obstacles.forEach(o => { if (!o.delete && !o.hitPlayer && o.damage && rectIntersect(hunterWorldBox, o)) { o.hitPlayer = true; state.currentHp -= 10; setHp(state.currentHp); state.hunter.vy = -5; state.hunter.hitFlash = 30; state.shake = 10; spawnBlood(state.hunter.x + 40, state.hunter.y + 40); } });
+                if (wordMatched) handleWordCompletedRef.current();
+
+                let shakeX = 0, shakeY = 0; if (state.shake > 0) { shakeX = (Math.random() - 0.5) * state.shake; shakeY = (Math.random() - 0.5) * state.shake; }
+                ctx.save(); ctx.translate(shakeX, shakeY);
+                const gradient = ctx.createLinearGradient(0, 0, 0, height); gradient.addColorStop(0, '#3E4E50'); gradient.addColorStop(1, '#1A2525'); ctx.fillStyle = gradient; ctx.fillRect(0, 0, width, height);
+                // Clouds
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                const cloudSpeed = 0.1; const scroll = state.cameraX * cloudSpeed;
+                const cloudPositions = [{x:100,y:50,s:60}, {x:300,y:80,s:50}, {x:600,y:40,s:70}, {x:900,y:70,s:55}, {x:1200,y:50,s:65}];
+                const loopWidth = 1200; const offset = Math.floor(scroll / loopWidth) * loopWidth;
+                for (let i = 0; i < 2; i++) {
+                    const layerOffset = offset + i * loopWidth;
+                    cloudPositions.forEach(cloud => {
+                        const drawX = cloud.x + layerOffset - scroll;
+                        if (drawX + cloud.s > 0 && drawX - cloud.s < width) {
+                            ctx.beginPath(); ctx.arc(drawX, cloud.y, cloud.s * 0.6, 0, Math.PI * 2); ctx.arc(drawX + cloud.s * 0.5, cloud.y + 10, cloud.s * 0.5, 0, Math.PI * 2); ctx.arc(drawX - cloud.s * 0.5, cloud.y + 10, cloud.s * 0.5, 0, Math.PI * 2); ctx.fill();
+                        }
+                    });
+                }
+
+                ctx.fillStyle = '#1b2124'; for(let i=0; i<8; i++) { const treeX = i * 150 + 20; ctx.beginPath(); ctx.moveTo(treeX - state.cameraX * 0.3, height); ctx.lineTo(treeX + 30 - state.cameraX * 0.3, height - 200); ctx.lineTo(treeX + 60 - state.cameraX * 0.3, height); ctx.fill(); }
+                ctx.fillStyle = '#1a0505'; ctx.fillRect(0, GROUND_LEVEL, width, height - GROUND_LEVEL);
+                ctx.fillStyle = '#2e3b2e'; ctx.fillRect(0, GROUND_LEVEL, width, 15);
+                state.particles.forEach(p => { ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fillRect(p.x, p.y, 4, 4); }); ctx.globalAlpha = 1.0;
+                if (state.hunter.hitFlash > 0 && Math.floor(state.hunter.hitFlash / 3) % 2 === 0) { ctx.globalAlpha = 0.6; ctx.fillStyle = '#ff0000'; ctx.beginPath(); ctx.arc(state.hunter.x + 40, state.hunter.y + 40, 45, 0, Math.PI*2); ctx.fill(); }
+                ctx.globalAlpha = 1.0;
+                const isAimingUp = state.keys['ArrowUp'];
+                drawEntity(ctx, assets, 'hunter', state.hunter.x - 5, state.hunter.y, 80, 80, state.frameCount, isMoving, isAimingUp, isCrouching, state.hunter.facing);
+                state.obstacles.forEach(o => { const screenX = o.x - state.cameraX; drawEntity(ctx, assets, o.key || o.type, screenX, o.y, o.w, o.h); });
+                state.enemies.forEach(e => { const screenX = e.x - state.cameraX; drawEntity(ctx, assets, e.type, screenX, e.y, e.w, e.h, state.frameCount, true); });
+                
+                ctx.font = '900 18px "Noto Sans TC"'; 
+                state.words.forEach(w => { 
+                    const screenX = w.x - state.cameraX; 
+                    const textMetrics = ctx.measureText(w.text || '?'); w.w = textMetrics.width + 40;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'; ctx.strokeStyle = '#444'; ctx.lineWidth = 2; 
+                    drawRoundRect(ctx, screenX, w.y, w.w, w.h, 10); ctx.fill(); ctx.stroke(); 
+                    ctx.fillStyle = '#000000'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+                    ctx.fillText(w.text || '?', screenX + w.w / 2, w.y + w.h / 2); 
+                });
+                ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+                
+                // 子彈繪製
+                state.bullets.forEach(b => {
+                    const screenX = b.x - state.cameraX; const screenY = b.y;
+                    // 為了視覺好看，繪製一個稍微小一點的發光核心，但保留大的碰撞箱邏輯
+                    const visualSize = 10; 
+                    const centerY = screenY + b.h/2;
+                    const centerX = screenX + b.w/2;
+                    
+                    ctx.save(); 
+                    ctx.shadowBlur = 15; ctx.shadowColor = '#ff4500'; 
+                    ctx.fillStyle = '#ff4500'; 
+                    ctx.beginPath(); ctx.arc(centerX, centerY, visualSize, 0, Math.PI * 2); ctx.fill(); 
+                    
+                    ctx.shadowBlur = 5; ctx.shadowColor = '#ffff00'; 
+                    ctx.fillStyle = '#ffff00'; 
+                    ctx.beginPath(); ctx.arc(centerX, centerY, visualSize/2, 0, Math.PI * 2); ctx.fill(); 
+                    
+                    // Debug: 顯示實際碰撞箱 (如果需要除錯可解開註解)
+                    // ctx.strokeStyle = 'rgba(255,0,0,0.5)'; ctx.strokeRect(screenX, screenY, b.w, b.h);
+                    
+                    ctx.restore();
+                });
+                ctx.restore();
+            };
+
+            const loopRef = useRef(loopLogic);
+            loopRef.current = loopLogic;
+
+            return (
+                <div className="w-full h-full relative">
+                    <canvas ref={canvasRef} width={800} height={400}/>
+                    <StatusOverlay hp={hp} currentTarget={currentTarget?.zh} total={totalWords} completed={completedCount} />
+                    <Controls onInput={handleMobileInput} />
+                </div>
+            );
+        };
+
+        const Level2Engine = ({ hp, setHp, onWin, onGameOver, assets }) => {
+            const canvasRef = useRef(null);
+            const requestRef = useRef();
+            const [bossHp, setBossHp] = useState(140);
+            const [currentQ, setCurrentQ] = useState(null);
+            const [feedback, setFeedback] = useState("");
+            const [qIndex, setQIndex] = useState(0);
+
+            const LEVEL2_WORDS = useRef(VOCABULARY.slice(10, 17)).current;
+            const stateRef = useRef({
+                hunter: { x: 50, y: 0, width: 80, height: 80, vy: 0, speed: 5, isGrounded: false, hitFlash: 0, facing: 'right' },
+                gravity: 0.6, jumpPower: -16,
+                boss: { x: 600, y: 160, w: 300, h: 300, vx: 0, vy: 2, state: 'idle', timer: 0, attackTimer: 0, hitFlash: 0 },
+                platforms: [{ x: 100, y: 300, w: 100, h: 20 }, { x: 300, y: 220, w: 100, h: 20 }, { x: 500, y: 150, w: 100, h: 20 }, { x: 200, y: 100, w: 80, h: 20 }],
+                bullets: [], particles: [], words: [], bossAttacks: [], obstacles: [], enemies: [], keys: {}, lastShot: 0, wordTimer: 0, frameCount: 0, currentHp: hp, bossHp: 140, shake: 0, cameraX: 0
+            });
+
+            useEffect(() => {
+                setCurrentQ(LEVEL2_WORDS[0]);
+                const animate = () => {
+                    loopRef.current();
+                    requestRef.current = requestAnimationFrame(animate);
+                };
+                requestRef.current = requestAnimationFrame(animate);
+
+                window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp);
+                return () => { 
+                    cancelAnimationFrame(requestRef.current);
+                    window.removeEventListener('keydown', handleKeyDown); 
+                    window.removeEventListener('keyup', handleKeyUp); 
+                };
+            }, []);
+
+            useEffect(() => { stateRef.current.currentHp = hp; if(hp <= 0) onGameOver(); }, [hp]);
+
+            const spawnWords = (targetWord) => {
+                const words = [];
+                const correct = targetWord || LEVEL2_WORDS[qIndex] || VOCABULARY[0];
+                const getRandomPos = () => ({ x: 200 + Math.random() * 500, y: 50 + Math.random() * 250 });
+                let pos = getRandomPos();
+                words.push({ text: correct.en, x: pos.x, y: pos.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, isCorrect: true, w: 100, h: 35, life: 180 });
+                pos = getRandomPos();
+                words.push({ text: generateSimilarWord(correct.en), x: pos.x, y: pos.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, isCorrect: false, w: 100, h: 35, life: 180 });
+                pos = getRandomPos();
+                let distractor = LEVEL2_WORDS[Math.floor(Math.random() * LEVEL2_WORDS.length)];
+                while(distractor.en === correct.en) { distractor = LEVEL2_WORDS[Math.floor(Math.random() * LEVEL2_WORDS.length)]; }
+                words.push({ text: distractor.en, x: pos.x, y: pos.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, isCorrect: false, w: 100, h: 35, life: 180 });
+                stateRef.current.words = words;
+            };
+
+            const nextQuestion = () => {
+                const nextIdx = qIndex + 1;
+                if (nextIdx >= LEVEL2_WORDS.length) { onWin(); } else { setQIndex(nextIdx); setCurrentQ(LEVEL2_WORDS[nextIdx]); stateRef.current.words = []; stateRef.current.wordTimer = 180; }
+            };
+
+            const handleKeyDown = (e) => stateRef.current.keys[e.code] = true;
+            const handleKeyUp = (e) => stateRef.current.keys[e.code] = false;
+            const handleMobileInput = (key, active) => stateRef.current.keys[key] = active;
+
+            const spawnBlood = (x, y) => { for(let i=0; i<8; i++) { stateRef.current.particles.push({ x: x, y: y, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8 - 2, life: 1.0, color: `rgba(255, ${Math.random()*50}, 0, 1)` }); } };
+            const rectIntersect = (r1, r2) => !(r2.x > r1.x + (r1.w || r1.width) || r2.x + (r2.w || r2.width) < r1.x || r2.y > r1.y + (r1.h || r1.height) || r2.y + (r2.h || r2.height) < r1.y);
+
+            const loopLogic = () => {
+                const canvas = canvasRef.current; if (!canvas) return;
+                const ctx = canvas.getContext('2d'); const state = stateRef.current;
+                const width = 800; const height = 400; const GROUND_LEVEL = height - 60;
+
+                state.frameCount++;
+                if (state.hunter.hitFlash > 0) state.hunter.hitFlash--;
+                if (state.boss.hitFlash > 0) state.boss.hitFlash--; 
+                if (state.shake > 0) { state.shake *= 0.9; if(state.shake < 0.5) state.shake = 0; }
+
+                state.hunter.vy += state.gravity;
+                const isCrouching = state.keys['ArrowDown'] && state.hunter.isGrounded;
+                let isMoving = false;
+                if (!isCrouching) {
+                    if (state.keys['ArrowLeft']) { state.hunter.x -= state.hunter.speed; isMoving = true; state.hunter.facing = 'left'; }
+                    if (state.keys['ArrowRight']) { state.hunter.x += state.hunter.speed; isMoving = true; state.hunter.facing = 'right'; }
+                }
+                if (state.hunter.x < 0) state.hunter.x = 0;
+                if (state.hunter.x > width - state.hunter.width) state.hunter.x = width - state.hunter.width;
+
+                let nextY = state.hunter.y + state.hunter.vy;
+                let grounded = false;
+                if (nextY + state.hunter.height >= GROUND_LEVEL) { nextY = GROUND_LEVEL - state.hunter.height; state.hunter.vy = 0; grounded = true; }
+                const playerBottom = state.hunter.y + state.hunter.height;
+                state.platforms.forEach(p => { if (state.hunter.vy > 0 && state.hunter.x + state.hunter.width > p.x && state.hunter.x < p.x + p.w && playerBottom <= p.y + 10 && nextY + state.hunter.height >= p.y) { nextY = p.y - state.hunter.height; state.hunter.vy = 0; grounded = true; } });
+                state.hunter.y = nextY;
+                state.hunter.isGrounded = grounded;
+
+                if (state.keys['ArrowUp'] && state.hunter.isGrounded && !isCrouching) { state.hunter.vy = state.jumpPower; state.hunter.isGrounded = false; }
+
+                if (state.keys['Space'] && Date.now() - state.lastShot > 300) {
+                    const shootUp = state.keys['ArrowUp']; const isLeft = state.hunter.facing === 'left';
+                    const bulletVx = shootUp ? 0 : (isLeft ? -12 : 12); const bulletVy = shootUp ? -12 : 0;
+                    let spawnY = state.hunter.y + (shootUp ? -10 : 40); if (isCrouching) spawnY += 20;
+                    const startX = state.hunter.x + state.cameraX + (shootUp ? 40 : (isLeft ? 0 : 80));
+                    
+                    // 修改：增加子彈判定範圍 (Level 2)
+                    const bulletW = shootUp ? 15 : 40; 
+                    const bulletH = shootUp ? 40 : 60;
+
+                    state.bullets.push({ x: startX, y: spawnY - (bulletH - 10)/2, w: bulletW, h: bulletH, vx: bulletVx, vy: bulletVy, delete: false });
+                    state.lastShot = Date.now();
+                }
+
+                if (state.boss.state === 'idle') {
+                    state.boss.y = 160 + Math.sin(state.frameCount * 0.05) * 50;
+                    state.boss.timer++;
+                    if (state.boss.timer > 180) { state.boss.state = Math.random() > 0.5 ? 'advance' : 'fire'; state.boss.timer = 0; }
+                } else if (state.boss.state === 'advance') {
+                    state.boss.x -= 5;
+                    if (state.boss.x < 100) { state.boss.state = 'retreat'; }
+                } else if (state.boss.state === 'retreat') {
+                    state.boss.x += 3;
+                    if (state.boss.x >= 600) { state.boss.state = 'idle'; }
+                } else if (state.boss.state === 'fire') {
+                    if (state.boss.timer === 0 || state.boss.timer === 20 || state.boss.timer === 40) {
+                        const angle = Math.atan2(state.hunter.y - (state.boss.y + 130), state.hunter.x - state.boss.x);
+                        state.bossAttacks.push({ x: state.boss.x, y: state.boss.y + 130, vx: Math.cos(angle) * 15, vy: Math.sin(angle) * 15, w: 40, h: 15, type: 'blue_beam', angle: angle });
+                    }
+                    state.boss.timer++;
+                    if (state.boss.timer > 60) { state.boss.state = 'idle'; state.boss.timer = 0; }
+                }
+
+                state.wordTimer++;
+                if (state.wordTimer > 200 && state.words.length === 0 && LEVEL2_WORDS[qIndex]) { spawnWords(LEVEL2_WORDS[qIndex]); state.wordTimer = 0; }
+
+                state.words.forEach(w => { w.x += w.vx; w.y += w.vy; w.life--; if(w.x < 50 || w.x > width - 100) w.vx *= -1; if(w.y < 50 || w.y > height - 100) w.vy *= -1; if (w.life <= 0) w.delete = true; });
+                state.words = state.words.filter(w => !w.delete);
+
+                state.bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
+                state.bossAttacks.forEach(a => { a.x += a.vx; a.y += a.vy; });
+                if(state.particles) { state.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.life -= 0.05; }); state.particles = state.particles.filter(p => p.life > 0); }
+
+                state.bullets = state.bullets.filter(b => b.x < width && b.y > -50 && !b.delete);
+                state.bossAttacks = state.bossAttacks.filter(a => a.x > -50 && !a.delete);
+
+                const hunterBox = { x: state.hunter.x, y: state.hunter.y, w: state.hunter.width, h: state.hunter.height };
+                if (isCrouching) { hunterBox.h = 45; hunterBox.y += 35; }
+                const bossBox = { x: state.boss.x, y: state.boss.y, w: state.boss.w, h: state.boss.h };
+
+                state.bullets.forEach((b) => {
+                    if(b.delete) return;
+                    let hitSomething = false;
+                    state.words.forEach(w => {
+                        if (hitSomething) return;
+                        if (rectIntersect(b, w)) {
+                            hitSomething = true; b.delete = true; w.delete = true; 
+                            if (w.isCorrect) {
+                                state.bossHp -= 20; setBossHp(state.bossHp); state.shake = 10; setFeedback("HIT! 💥"); state.boss.hitFlash = 30; 
+                                setTimeout(() => { setFeedback(""); nextQuestion(); }, 500);
+                            } else { 
+                                setFeedback("WRONG! 💢"); setTimeout(() => setFeedback(""), 500); state.words = []; state.wordTimer = 150; 
+                            }
+                        }
+                    });
+                    if (!hitSomething && rectIntersect(b, bossBox)) { b.delete = true; state.particles.push({ x: b.x, y: b.y, vx: -5, vy: (Math.random()-0.5)*10, life: 0.5, color: '#ffff00' }); }
+                });
+
+                if (state.hunter.hitFlash <= 0) {
+                    if (rectIntersect(hunterBox, bossBox)) { state.currentHp -= 20; setHp(state.currentHp); state.hunter.hitFlash = 40; state.shake = 20; state.hunter.vy = -10; state.hunter.x -= 50; spawnBlood(state.hunter.x, state.hunter.y); }
+                    state.bossAttacks.forEach(a => { if (!a.delete && rectIntersect(hunterBox, a)) { a.delete = true; state.currentHp -= 15; setHp(state.currentHp); state.hunter.hitFlash = 30; state.shake = 10; spawnBlood(state.hunter.x, state.hunter.y); } });
+                }
+
+                let shakeX = 0, shakeY = 0; if (state.shake > 0) { shakeX = (Math.random() - 0.5) * state.shake; shakeY = (Math.random() - 0.5) * state.shake; }
+                ctx.save(); ctx.translate(shakeX, shakeY);
+                const gradient = ctx.createLinearGradient(0, 0, 0, height); gradient.addColorStop(0, '#3E4E50'); gradient.addColorStop(1, '#1A2525'); ctx.fillStyle = gradient; ctx.fillRect(0, 0, width, height);
+                // Clouds
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                const cloudPositions = [{x:100,y:50,s:60}, {x:300,y:80,s:50}, {x:600,y:40,s:70}, {x:900,y:70,s:55}, {x:1200,y:50,s:65}];
+                cloudPositions.forEach(cloud => {
+                    const drawX = cloud.x;
+                    ctx.beginPath(); ctx.arc(drawX, cloud.y, cloud.s * 0.6, 0, Math.PI * 2); ctx.arc(drawX + cloud.s * 0.5, cloud.y + 10, cloud.s * 0.5, 0, Math.PI * 2); ctx.arc(drawX - cloud.s * 0.5, cloud.y + 10, cloud.s * 0.5, 0, Math.PI * 2); ctx.fill();
+                });
+
+                // --- 新增：繪製平台 (Level 2 Fix) ---
+                state.platforms.forEach(p => {
+                    // 使用牆壁素材，如果有載入的話
+                    const wallImg = assets['wall'];
+                    if (wallImg && wallImg.complete && wallImg.naturalWidth > 0) {
+                        ctx.drawImage(wallImg, p.x, p.y, p.w, p.h);
+                    } else {
+                        // Fallback: 咖啡色方塊
+                        ctx.fillStyle = '#654321';
+                        ctx.fillRect(p.x, p.y, p.w, p.h);
+                    }
+                    // 加個邊框讓它更明顯
+                    ctx.strokeStyle = '#3e2723';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(p.x, p.y, p.w, p.h);
+                });
+
+                ctx.fillStyle = '#1b2124'; for(let i=0; i<8; i++) { const treeX = i * 150 + 20; ctx.beginPath(); ctx.moveTo(treeX, height); ctx.lineTo(treeX + 30, height - 200 - Math.random()*50); ctx.lineTo(treeX + 60, height); ctx.fill(); }
+                ctx.fillStyle = '#1a0505'; ctx.fillRect(0, GROUND_LEVEL, width, height - GROUND_LEVEL);
+                ctx.fillStyle = '#2e3b2e'; ctx.fillRect(0, GROUND_LEVEL, width, 15);
+                state.particles.forEach(p => { ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fillRect(p.x, p.y, 4, 4); }); ctx.globalAlpha = 1.0;
+                if (state.hunter.hitFlash > 0 && Math.floor(state.hunter.hitFlash / 3) % 2 === 0) { ctx.globalAlpha = 0.6; ctx.fillStyle = '#ff0000'; ctx.beginPath(); ctx.arc(state.hunter.x + 40, state.hunter.y + 40, 45, 0, Math.PI*2); ctx.fill(); }
+                ctx.globalAlpha = 1.0;
+                const isAimingUp = state.keys['ArrowUp'];
+                drawEntity(ctx, assets, 'hunter', state.hunter.x - 5, state.hunter.y, 80, 80, state.frameCount, isMoving, isAimingUp, isCrouching, state.hunter.facing);
+                drawEntity(ctx, assets, 'boss', state.boss.x, state.boss.y, state.boss.w, state.boss.h, state.frameCount, true); 
+                
+                if (state.boss.hitFlash > 0) { ctx.strokeStyle = `rgba(255, 0, 0, ${state.boss.hitFlash / 30})`; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(state.boss.x + state.boss.w/2, state.boss.y + state.boss.h/2, 100, 0, Math.PI*2); ctx.stroke(); }
+
+                state.bossAttacks.forEach(a => {
+                    if (a.type === 'blue_beam') {
+                        ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.angle || 0); 
+                        ctx.shadowBlur = 20; ctx.shadowColor = '#00ffff'; ctx.fillStyle = '#00ffff'; ctx.fillRect(0, -5, a.w, a.h); 
+                        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, -2, a.w, a.h/2); ctx.restore();
+                    } else { ctx.font = '30px Arial'; ctx.fillText('🔥', a.x, a.y + 20); }
+                });
+                
+                ctx.font = '900 18px "Noto Sans TC"'; 
+                state.words.forEach(w => { 
+                    const textMetrics = ctx.measureText(w.text || '?'); w.w = textMetrics.width + 40;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'; ctx.strokeStyle = '#444'; ctx.lineWidth = 2; 
+                    drawRoundRect(ctx, w.x, w.y, w.w, w.h, 10); ctx.fill(); ctx.stroke(); 
+                    ctx.fillStyle = '#000000'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; 
+                    ctx.fillText(w.text || '?', w.x + w.w / 2, w.y + w.h / 2); 
+                });
+                ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+                
+                // 子彈繪製 (Level 2)
+                state.bullets.forEach(b => {
+                    const screenX = b.x - state.cameraX; const screenY = b.y;
+                    const visualSize = 10;
+                    const centerY = screenY + b.h/2;
+                    const centerX = screenX + b.w/2;
+                    
+                    ctx.save(); 
+                    ctx.shadowBlur = 15; ctx.shadowColor = '#ff4500'; 
+                    ctx.fillStyle = '#ff4500'; 
+                    ctx.beginPath(); ctx.arc(centerX, centerY, visualSize, 0, Math.PI * 2); ctx.fill(); 
+                    
+                    ctx.shadowBlur = 5; ctx.shadowColor = '#ffff00'; 
+                    ctx.fillStyle = '#ffff00'; 
+                    ctx.beginPath(); ctx.arc(centerX, centerY, visualSize/2, 0, Math.PI * 2); ctx.fill(); 
+                    ctx.restore();
+                });
+                ctx.restore();
+            };
+
+            const loopRef = useRef(loopLogic);
+            loopRef.current = loopLogic;
+
+            return (
+                <div className="w-full h-full relative">
+                    <canvas ref={canvasRef} width={800} height={400}/>
+                    <StatusOverlay hp={hp} bossHp={bossHp} currentTarget={currentQ?.zh} feedback={feedback} />
+                    <Controls onInput={handleMobileInput} />
+                </div>
+            );
+        };
+
+        function App() {
+            const [gameState, setGameState] = useState('menu'); 
+            const [score, setScore] = useState(0);
+            const [hp, setHp] = useState(100);
+            const { images, loaded } = useGameAssets(); // 獲取圖片與載入狀態
+
+            const startGame = () => { setScore(0); setHp(100); setGameState('level1'); };
+            const handleLevel1Complete = (finalHp) => { setHp(finalHp); setGameState('transition'); };
+            const startLevel2 = () => { setHp(100); setGameState('level2'); };
+            const handleGameOver = () => { setGameState('gameover'); };
+            const handleWin = () => { setGameState('win'); };
+
+            // 載入畫面
+            if (!loaded) {
+                return (
+                    <div className="flex flex-col h-screen w-full items-center justify-center bg-gray-900 text-white">
+                        <div className="text-2xl animate-pulse mb-4">正在載入資源...</div>
+                        <button onClick={() => {
+                            // 強制跳過載入
+                            document.querySelector('.animate-pulse').innerText = "強制啟動中...";
+                            setTimeout(() => {
+                                // 這裡無法直接修改 loaded，依賴 useGameAssets 內部的 timeout
+                            }, 500);
+                        }} className="text-sm text-gray-500 border border-gray-600 px-2 py-1 rounded">如果卡住請點此</button>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="w-full h-full relative bg-gray-900 select-none">
+                    <div className="landscape-warning fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center text-white p-8 text-center">
+                        <div className="text-6xl mb-4">📱➡️📱</div>
+                        <h2 className="text-2xl font-bold mb-2">請旋轉您的裝置</h2>
+                        <p>為了獲得最佳遊戲體驗，請將手機轉為橫向。</p>
+                        <button onClick={() => document.querySelector('.landscape-warning').style.display = 'none'} className="mt-4 px-4 py-2 border border-white rounded text-sm opacity-50">強制進入 (不推薦)</button>
+                    </div>
+
+                    <ErrorBoundary>
+                        <div className="game-container">
+                            {gameState === 'menu' && <MenuScreen onStart={startGame} />}
+                            {gameState === 'level1' && <Level1Engine hp={hp} setHp={setHp} onComplete={handleLevel1Complete} onGameOver={handleGameOver} assets={images} />}
+                            {gameState === 'transition' && <TransitionScreen onNext={startLevel2} hp={hp} />}
+                            {gameState === 'level2' && <Level2Engine hp={hp} setHp={setHp} onWin={handleWin} onGameOver={handleGameOver} assets={images} />}
+                            {gameState === 'win' && <WinScreen onRestart={() => setGameState('menu')} />}
+                            {gameState === 'gameover' && <GameOverScreen onRestart={() => setGameState('menu')} score={score} />}
+                        </div>
+                    </ErrorBoundary>
+                </div>
+            );
+        }
+
+        const MenuScreen = ({ onStart }) => {
+            const handleTouchEnd = (e) => {
+                e.preventDefault();
+                onStart();
+            };
+            return (
+                <div className="absolute inset-0 flex flex-col items-center bg-gray-800 bg-opacity-95 z-40 w-full h-full p-6">
+                    <div className="flex-1 flex flex-col items-center justify-center w-full pt-32 pb-10">
+                        <h1 className="text-5xl md:text-7xl font-bold mb-10 text-yellow-400 text-center tracking-wider" style={{textShadow: '6px 6px 0 #000'}}>單字獵人冒險</h1>
+                        
+                        <button 
+                            onClick={onStart} 
+                            onTouchEnd={handleTouchEnd}
+                            className="px-14 py-6 bg-red-600 hover:bg-red-500 text-white font-bold rounded-2xl text-3xl shadow-2xl transform transition active:scale-95 border-b-8 border-red-800 touch-manipulation">
+                            開始遊戲 (Start)
+                        </button>
+                    </div>
+
+                    <div className="w-full max-w-2xl bg-black bg-opacity-60 rounded-xl border border-gray-600 p-3 mb-2 opacity-80 backdrop-blur-sm">
+                        <div className="flex flex-row justify-between items-center text-xs md:text-sm text-gray-300">
+                            <div className="flex-1 text-center border-r border-gray-600 px-2">
+                                <span className="text-yellow-300 font-bold block mb-1">🌲 第一關</span>
+                                <span>射擊正確單字</span>
+                            </div>
+                            <div className="flex-1 text-center border-r border-gray-600 px-2">
+                                <span className="text-red-300 font-bold block mb-1">🦖 第二關</span>
+                                <span>躲避恐龍攻擊</span>
+                            </div>
+                            <div className="flex-1 text-center px-2">
+                                <span className="text-blue-300 font-bold block mb-1">🎮 操作</span>
+                                <span>左手移動 / 右手跳躍射擊</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const TransitionScreen = ({ onNext, hp }) => (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-800 z-40 w-full h-full">
+                <h2 className="text-3xl md:text-5xl text-yellow-400 font-bold mb-6">第一關完成！</h2>
+                <div className="text-7xl mb-8">🤠 🎉</div>
+                <p className="text-2xl mb-10 text-white">目前血量: <span className="text-green-400">{hp}%</span> (即將補滿)</p>
+                <button onClick={onNext} onTouchEnd={(e) => { e.preventDefault(); onNext(); }} className="px-10 py-4 bg-blue-600 hover:bg-blue-500 rounded-xl text-2xl font-bold border-b-8 border-blue-800 text-white">進入第二關 (BOSS戰)</button>
+            </div>
+        );
+
+        const WinScreen = ({ onRestart }) => (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-yellow-900 z-40 w-full h-full">
+                <h2 className="text-5xl md:text-6xl text-yellow-300 font-bold mb-6">任務完成！</h2>
+                <p className="text-2xl md:text-3xl mb-10 text-center px-4 text-white">你成功擊敗了恐龍！</p>
+                <button onClick={onRestart} onTouchEnd={(e) => { e.preventDefault(); onRestart(); }} className="px-10 py-4 bg-green-600 hover:bg-green-500 rounded-xl text-2xl font-bold border-b-8 border-green-800 text-white">回到主選單</button>
+            </div>
+        );
+
+        const GameOverScreen = ({ onRestart }) => (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-900 z-40 w-full h-full">
+                <h2 className="text-6xl md:text-7xl text-gray-200 font-bold mb-8">GAME OVER</h2>
+                <button onClick={onRestart} onTouchEnd={(e) => { e.preventDefault(); onRestart(); }} className="px-10 py-4 bg-gray-600 hover:bg-gray-500 rounded-xl text-2xl font-bold border-b-8 border-gray-800 text-white">重新挑戰</button>
+            </div>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
